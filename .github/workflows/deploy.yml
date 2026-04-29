@@ -35,7 +35,7 @@ jobs:
           username: ${{ secrets.FTP_USERNAME }}
           password: ${{ secrets.FTP_PASSWORD }}
           local-dir: ./dist/
-          server-dir: /budget/   # path relative to your FTP root
+          server-dir: /public_html/budget/   # path relative to your FTP root
           dangerous-clean-slate: false  # set to true to wipe server dir on each deploy (careful!)
           exclude: |
             **/.git*
