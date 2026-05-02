@@ -15,6 +15,7 @@ const {
   accountsRouter, categoriesRouter,
   budgetsRouter, allocationsRouter,
 } = require('./routes/resources');
+const exchangeRatesRouter = require('./routes/exchange-rates')
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -37,6 +38,7 @@ app.use('/api/categories',   requireAuth, categoriesRouter);
 app.use('/api/budgets',      requireAuth, budgetsRouter);
 app.use('/api/allocations',  requireAuth, allocationsRouter);
 app.use('/api/summary',      requireAuth, summaryRouter);
+app.use(['/api/exchange-rates', '/budget-api/api/exchange-rates'], requireAuth, exchangeRatesRouter);
 
 // ── 404 / error ───────────────────────────────────────────────────────────────
 app.use('/api/*', (req, res) => res.status(404).json({ error: 'Route not found' }));

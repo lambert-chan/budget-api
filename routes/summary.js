@@ -1,104 +1,104 @@
-const router = require('express').Router();
-const { pool } = require('../db/connection');
+const router = require('express').Router()
+const { pool } = require('../db/connection')
 
 function monthBounds(month) {
-  const start = month ? `${month}-01` : new Date().toISOString().slice(0, 7) + '-01';
-  const end   = new Date(start);
-  end.setMonth(end.getMonth() + 1);
-  return { start, end: end.toISOString().slice(0, 10) };
+  const start = month ? `${month}-01` : new Date().toISOString().slice(0, 7) + '-01'
+  const end   = new Date(start)
+  end.setMonth(end.getMonth() + 1)
+  return { start, end: end.toISOString().slice(0, 10) }
 }
 
-// ── GET /api/summary/household?month=2025-01 ─────────────────────────────────
-// Shared income, shared expenses, each user's allocation, and remainder
+// GET /api/summary/household?month=2025-01
 router.get('/household', async (req, res) => {
   try {
-    const { start, end } = monthBounds(req.query.month);
+    const { start, end } = monthBounds(req.query.month)
 
-    // Pooled income (all income transactions are shared)
     const [[income]] = await pool.execute(
-      `SELECT COALESCE(SUM(amount), 0) AS total
-       FROM transactions
-       WHERE type='income' AND scope='shared' AND date >= ? AND date < ?`,
+      `SELECT COALESCE(SUM(amount_cad), 0) AS total
+       FROM transactions WHERE type='income' AND scope='shared' AND date >= ? AND date < ?`,
       [start, end]
-    );
+    )
 
-    // Shared expenses
     const [[sharedExp]] = await pool.execute(
-      `SELECT COALESCE(SUM(amount), 0) AS total
-       FROM transactions
-       WHERE type='expense' AND scope='shared' AND date >= ? AND date < ?`,
+      `SELECT COALESCE(SUM(amount_cad), 0) AS total
+       FROM transactions WHERE type='expense' AND scope='shared' AND date >= ? AND date < ?`,
       [start, end]
-    );
+    )
 
-    // Shared expenses by category
+    // Spending by category — group by category + currency so mixed currencies show separately
     const [byCategory] = await pool.execute(
-      `SELECT c.name, c.color, COALESCE(SUM(t.amount), 0) AS total
+      `SELECT c.name, c.color, t.currency,
+              COALESCE(SUM(t.amount), 0)     AS total_original,
+              COALESCE(SUM(t.amount_cad), 0) AS total_cad
        FROM transactions t
        JOIN categories c ON t.category_id = c.id
        WHERE t.type='expense' AND t.scope='shared' AND t.date >= ? AND t.date < ?
-       GROUP BY c.id ORDER BY total DESC`,
+       GROUP BY c.id, t.currency
+       ORDER BY total_cad DESC`,
       [start, end]
-    );
+    )
 
-    // Each user's allocation + how much of their fund they spent this month
     const [userFunds] = await pool.execute(
       `SELECT u.id, u.name,
               COALESCE(a.amount, 0) AS fund_amount,
-              COALESCE(SUM(t.amount), 0) AS fund_spent
+              COALESCE(SUM(t.amount_cad), 0) AS fund_spent
        FROM users u
        LEFT JOIN allocations a ON a.user_id = u.id
        LEFT JOIN transactions t
-         ON t.created_by = u.id
-         AND t.scope = 'personal'
-         AND t.type = 'expense'
-         AND t.date >= ? AND t.date < ?
+         ON t.created_by = u.id AND t.scope = 'personal'
+         AND t.type = 'expense' AND t.date >= ? AND t.date < ?
        GROUP BY u.id`,
       [start, end]
-    );
+    )
 
-    const totalAllocations = userFunds.reduce((s, u) => s + parseFloat(u.fund_amount), 0);
-    const pooledIncome     = parseFloat(income.total);
-    const sharedExpenses   = parseFloat(sharedExp.total);
-    const remainder        = pooledIncome - sharedExpenses - totalAllocations;
+    const totalAllocations = userFunds.reduce((s, u) => s + parseFloat(u.fund_amount), 0)
+    const pooledIncome     = parseFloat(income.total)
+    const sharedExpenses   = parseFloat(sharedExp.total)
+    const remainder        = pooledIncome - sharedExpenses - totalAllocations
 
     return res.json({
-      month:            start.slice(0, 7),
-      pooled_income:    pooledIncome,
-      shared_expenses:  sharedExpenses,
+      month: start.slice(0, 7),
+      pooled_income:     pooledIncome,
+      shared_expenses:   sharedExpenses,
       total_allocations: totalAllocations,
       remainder,
-      by_category:      byCategory,
-      user_funds:       userFunds.map(u => ({
+      by_category: byCategory.map(c => ({
+        ...c,
+        total_original: parseFloat(c.total_original),
+        total_cad:      parseFloat(c.total_cad),
+        // label used in charts — append currency if not CAD
+        label: c.currency !== 'CAD' ? `${c.name} (${c.currency})` : c.name,
+      })),
+      user_funds: userFunds.map(u => ({
         ...u,
         fund_amount:    parseFloat(u.fund_amount),
         fund_spent:     parseFloat(u.fund_spent),
         fund_remaining: parseFloat(u.fund_amount) - parseFloat(u.fund_spent),
       })),
-    });
+    })
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: 'Failed to fetch household summary' });
+    console.error(err)
+    return res.status(500).json({ error: 'Failed to fetch household summary' })
   }
-});
+})
 
-// ── GET /api/summary/personal?month=2025-01 ──────────────────────────────────
-// Current user's personal fund: allocation, spent, remaining, breakdown
+// GET /api/summary/personal?month=2025-01
 router.get('/personal', async (req, res) => {
   try {
-    const { start, end } = monthBounds(req.query.month);
-    const userId = req.user.id;
+    const { start, end } = monthBounds(req.query.month)
+    const userId = req.user.id
 
     const [[allocation]] = await pool.execute(
       'SELECT COALESCE(amount, 0) AS fund_amount FROM allocations WHERE user_id = ?',
       [userId]
-    );
+    )
 
     const [[spent]] = await pool.execute(
-      `SELECT COALESCE(SUM(amount), 0) AS total
+      `SELECT COALESCE(SUM(amount_cad), 0) AS total
        FROM transactions
        WHERE created_by=? AND scope='personal' AND type='expense' AND date >= ? AND date < ?`,
       [userId, start, end]
-    );
+    )
 
     const [transactions] = await pool.execute(
       `SELECT t.*, c.name AS category_name, c.color AS category_color, a.name AS account_name
@@ -108,20 +108,22 @@ router.get('/personal', async (req, res) => {
        WHERE t.created_by=? AND t.scope='personal' AND t.date >= ? AND t.date < ?
        ORDER BY t.date DESC`,
       [userId, start, end]
-    );
+    )
 
     const [byCategory] = await pool.execute(
-      `SELECT c.name, c.color, COALESCE(SUM(t.amount), 0) AS total
+      `SELECT c.name, c.color, t.currency,
+              COALESCE(SUM(t.amount), 0)     AS total_original,
+              COALESCE(SUM(t.amount_cad), 0) AS total_cad
        FROM transactions t
        JOIN categories c ON t.category_id = c.id
        WHERE t.created_by=? AND t.scope='personal' AND t.type='expense'
          AND t.date >= ? AND t.date < ?
-       GROUP BY c.id ORDER BY total DESC`,
+       GROUP BY c.id, t.currency ORDER BY total_cad DESC`,
       [userId, start, end]
-    );
+    )
 
-    const fundAmount = parseFloat(allocation.fund_amount);
-    const fundSpent  = parseFloat(spent.total);
+    const fundAmount = parseFloat(allocation.fund_amount)
+    const fundSpent  = parseFloat(spent.total)
 
     return res.json({
       month:          start.slice(0, 7),
@@ -129,72 +131,69 @@ router.get('/personal', async (req, res) => {
       fund_amount:    fundAmount,
       fund_spent:     fundSpent,
       fund_remaining: fundAmount - fundSpent,
-      by_category:    byCategory,
+      by_category:    byCategory.map(c => ({
+        ...c,
+        total_original: parseFloat(c.total_original),
+        total_cad:      parseFloat(c.total_cad),
+        label: c.currency !== 'CAD' ? `${c.name} (${c.currency})` : c.name,
+      })),
       transactions,
-    });
+    })
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: 'Failed to fetch personal summary' });
+    console.error(err)
+    return res.status(500).json({ error: 'Failed to fetch personal summary' })
   }
-});
+})
 
-// ── GET /api/summary/full?month=2025-01 ──────────────────────────────────────
-// Complete picture: pooled income, shared expenses, all personal spending, net
+// GET /api/summary/full?month=2025-01
 router.get('/full', async (req, res) => {
   try {
-    const { start, end } = monthBounds(req.query.month);
+    const { start, end } = monthBounds(req.query.month)
 
     const [[income]] = await pool.execute(
-      `SELECT COALESCE(SUM(amount), 0) AS total FROM transactions
-       WHERE type='income' AND date >= ? AND date < ?`,
-      [start, end]
-    );
-
+      `SELECT COALESCE(SUM(amount_cad), 0) AS total FROM transactions
+       WHERE type='income' AND date >= ? AND date < ?`, [start, end]
+    )
     const [[sharedExp]] = await pool.execute(
-      `SELECT COALESCE(SUM(amount), 0) AS total FROM transactions
-       WHERE type='expense' AND scope='shared' AND date >= ? AND date < ?`,
-      [start, end]
-    );
-
+      `SELECT COALESCE(SUM(amount_cad), 0) AS total FROM transactions
+       WHERE type='expense' AND scope='shared' AND date >= ? AND date < ?`, [start, end]
+    )
     const [[personalExp]] = await pool.execute(
-      `SELECT COALESCE(SUM(amount), 0) AS total FROM transactions
-       WHERE type='expense' AND scope='personal' AND date >= ? AND date < ?`,
-      [start, end]
-    );
+      `SELECT COALESCE(SUM(amount_cad), 0) AS total FROM transactions
+       WHERE type='expense' AND scope='personal' AND date >= ? AND date < ?`, [start, end]
+    )
 
-    // Per-user personal spending (visible to all for the full picture)
     const [perUser] = await pool.execute(
-      `SELECT u.name, COALESCE(SUM(t.amount), 0) AS spent
+      `SELECT u.name, COALESCE(SUM(t.amount_cad), 0) AS spent
        FROM users u
        LEFT JOIN transactions t
          ON t.created_by = u.id AND t.scope = 'personal'
          AND t.type = 'expense' AND t.date >= ? AND t.date < ?
-       GROUP BY u.id`,
-      [start, end]
-    );
+       GROUP BY u.id`, [start, end]
+    )
 
     const [accounts] = await pool.execute(
       'SELECT name, type, balance, currency FROM accounts ORDER BY name'
-    );
+    )
 
-    const totalIncome   = parseFloat(income.total);
-    const totalShared   = parseFloat(sharedExp.total);
-    const totalPersonal = parseFloat(personalExp.total);
+    const totalIncome   = parseFloat(income.total)
+    const totalShared   = parseFloat(sharedExp.total)
+    const totalPersonal = parseFloat(personalExp.total)
 
     return res.json({
-      month:            start.slice(0, 7),
-      total_income:     totalIncome,
-      shared_expenses:  totalShared,
+      month:             start.slice(0, 7),
+      total_income:      totalIncome,
+      shared_expenses:   totalShared,
       personal_expenses: totalPersonal,
-      total_expenses:   totalShared + totalPersonal,
-      net:              totalIncome - totalShared - totalPersonal,
+      total_expenses:    totalShared + totalPersonal,
+      net:               totalIncome - totalShared - totalPersonal,
       per_user_personal: perUser.map(u => ({ ...u, spent: parseFloat(u.spent) })),
       accounts,
-    });
+    })
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: 'Failed to fetch full summary' });
+    console.error(err)
+    return res.status(500).json({ error: 'Failed to fetch full summary' })
   }
-});
+})
 
-module.exports = router;
+module.exports = router
